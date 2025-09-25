@@ -58,4 +58,3 @@ impl ScalarUDFImpl for JsonFormat {
         &self.aliases
     }
 }
-

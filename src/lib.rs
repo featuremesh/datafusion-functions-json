@@ -12,6 +12,7 @@ mod json_as_text;
 mod json_contains;
 mod json_extract;
 mod json_extract_scalar;
+mod json_format;
 mod json_get;
 mod json_get_array;
 mod json_get_bool;
@@ -21,9 +22,8 @@ mod json_get_json;
 mod json_get_str;
 mod json_length;
 mod json_object_keys;
-mod rewrite;
-mod json_format;
 mod json_parse;
+mod rewrite;
 
 pub use common_union::{JsonUnionEncoder, JsonUnionValue, JSON_UNION_DATA_TYPE};
 
@@ -33,7 +33,6 @@ pub mod functions {
     pub use crate::json_extract::json_extract;
     pub use crate::json_extract_scalar::json_extract_scalar;
     pub use crate::json_format::json_format;
-    pub use crate::json_parse::json_parse;
     pub use crate::json_get::json_get;
     pub use crate::json_get_array::json_get_array;
     pub use crate::json_get_bool::json_get_bool;
@@ -43,6 +42,7 @@ pub mod functions {
     pub use crate::json_get_str::json_get_str;
     pub use crate::json_length::json_length;
     pub use crate::json_object_keys::json_object_keys;
+    pub use crate::json_parse::json_parse;
 }
 
 pub mod udfs {

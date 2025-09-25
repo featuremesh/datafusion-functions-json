@@ -3,7 +3,6 @@ use rstest::rstest;
 
 mod utils;
 
-
 #[rstest]
 #[case(
     "[{\"ac\": \"Dune\", \"ca\": \"Frank Herbert\"},{\"ad\": \"Foundation\", \"da\": \"Isaac Asimov\"}]",
@@ -14,7 +13,6 @@ async fn test_json_parse(#[case] json_data: String, #[case] expected: &str) {
     let result = json_parse(&json_data).await;
     assert_eq!(result, expected.to_string());
 }
-
 
 async fn json_parse(json: &str) -> String {
     let sql = format!("select json_parse('{}')", json);
