@@ -10,14 +10,9 @@ use crate::common_macros::make_udf_function;
 use crate::common_union::JsonUnion;
 use crate::json_get::jiter_json_get_union;
 
-make_udf_function!(
-    JsonParse,
-    json_parse,
-    json_data,
-    r#"Parses the JSON string passed"#
-);
+make_udf_function!(JsonParse, json_parse, json_data, r#"Parses the JSON string passed"#);
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq, Hash)]
 pub(super) struct JsonParse {
     signature: Signature,
     aliases: [String; 1],
@@ -58,4 +53,3 @@ impl ScalarUDFImpl for JsonParse {
         &self.aliases
     }
 }
-

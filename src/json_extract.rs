@@ -1,11 +1,11 @@
 use crate::common::{invoke, parse_jsonpath, return_type_check};
 use crate::common_macros::make_udf_function;
+use crate::common_union::JsonUnion;
+use crate::json_get::jiter_json_get_union;
 use datafusion::arrow::datatypes::{DataType, DataType::Utf8};
 use datafusion::common::{exec_err, Result as DataFusionResult, ScalarValue};
 use datafusion::logical_expr::{ColumnarValue, ScalarFunctionArgs, ScalarUDFImpl, Signature, Volatility};
 use std::any::Any;
-use crate::common_union::JsonUnion;
-use crate::json_get::jiter_json_get_union;
 
 make_udf_function!(
     JsonExtract,
@@ -14,7 +14,7 @@ make_udf_function!(
     r#"Get a value from a JSON string by its "path" in JSONPath format"#
 );
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq, Hash)]
 pub(super) struct JsonExtract {
     signature: Signature,
     aliases: [String; 1],
@@ -73,9 +73,7 @@ impl ScalarUDFImpl for JsonExtract {
 
         let path = parse_jsonpath(path_str);
 
-        invoke::<JsonUnion>(&[json_arg.clone()], |json, _| {
-            jiter_json_get_union(json, &path)
-        })
+        invoke::<JsonUnion>(&[json_arg.clone()], |json, _| jiter_json_get_union(json, &path))
     }
 
     fn aliases(&self) -> &[String] {
