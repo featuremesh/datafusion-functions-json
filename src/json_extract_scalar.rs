@@ -54,21 +54,23 @@ impl ScalarUDFImpl for JsonExtractScalar {
         let json_arg = &args.args[0];
         let path_arg = &args.args[1];
 
-        let path_str = match path_arg {
-            ColumnarValue::Scalar(
-                ScalarValue::Utf8(Some(s)) | ScalarValue::Utf8View(Some(s)) | ScalarValue::LargeUtf8(Some(s)),
-            ) => s,
-            _ => {
-                return exec_err!(
-                    "'{}' expects a valid JSONPath string (e.g., '$.key[0]') as second argument",
-                    self.name()
-                )
-            }
+        let ColumnarValue::Scalar(
+            ScalarValue::Utf8(Some(path_str))
+            | ScalarValue::Utf8View(Some(path_str))
+            | ScalarValue::LargeUtf8(Some(path_str)),
+        ) = path_arg
+        else {
+            return exec_err!(
+                "'{}' expects a valid JSONPath string (e.g., '$.key[0]') as second argument",
+                self.name()
+            );
         };
 
         let path = parse_jsonpath(path_str);
 
-        invoke::<JsonUnion>(&[json_arg.clone()], |json, _| jiter_json_get_union(json, &path))
+        invoke::<JsonUnion>(std::slice::from_ref(json_arg), |json, _| {
+            jiter_json_get_union(json, &path)
+        })
     }
 
     fn aliases(&self) -> &[String] {

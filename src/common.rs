@@ -151,7 +151,7 @@ pub(crate) fn parse_jsonpath(path: &str) -> Vec<JsonPath<'static>> {
         .map(|segment| match segment {
             Segment::Selector(s) => match s {
                 Selector::Name(name) => JsonPath::Key(Box::leak(name.into_boxed_str())),
-                Selector::Index(idx) => JsonPath::Index(idx as usize),
+                Selector::Index(idx) => JsonPath::from(idx),
                 _ => JsonPath::None,
             },
             _ => JsonPath::None,
