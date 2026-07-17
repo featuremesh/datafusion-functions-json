@@ -38,7 +38,7 @@ fn optimise_json_get_cast(cast: &Cast) -> Option<Transformed<Expr>> {
     if scalar_func.func.name() != "json_get" {
         return None;
     }
-    let func = match &cast.data_type {
+    let func = match cast.field.data_type() {
         DataType::Boolean => crate::json_get_bool::json_get_bool_udf(),
         DataType::Float64 | DataType::Float32 | DataType::Decimal128(_, _) | DataType::Decimal256(_, _) => {
             crate::json_get_float::json_get_float_udf()
@@ -143,11 +143,9 @@ fn expr_to_sql_repr(expr: &Expr) -> String {
     match expr {
         Expr::Column(Column {
             name,
-            relation,
+            relation: _,
             spans: _,
-        }) => relation
-            .as_ref()
-            .map_or_else(|| name.clone(), |r| format!("{r}.{name}")),
+        }) => name.clone(),
         Expr::Alias(alias) => alias.name.clone(),
         Expr::Literal(scalar, _) => match scalar {
             ScalarValue::Utf8(Some(v)) | ScalarValue::Utf8View(Some(v)) | ScalarValue::LargeUtf8(Some(v)) => {

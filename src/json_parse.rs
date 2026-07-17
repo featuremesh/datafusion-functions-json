@@ -1,5 +1,3 @@
-use std::any::Any;
-
 use datafusion::arrow::datatypes::DataType;
 use datafusion::arrow::datatypes::DataType::Utf8;
 use datafusion::common::Result as DataFusionResult;
@@ -10,7 +8,7 @@ use crate::common_macros::make_udf_function;
 use crate::common_union::JsonUnion;
 use crate::json_get::jiter_json_get_union;
 
-make_udf_function!(JsonParse, json_parse, json_data, r#"Parses the JSON string passed"#);
+make_udf_function!(JsonParse, json_parse, json_data, r"Parses the JSON string passed");
 
 #[derive(Debug, PartialEq, Eq, Hash)]
 pub(super) struct JsonParse {
@@ -28,10 +26,6 @@ impl Default for JsonParse {
 }
 
 impl ScalarUDFImpl for JsonParse {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn name(&self) -> &str {
         self.aliases[0].as_str()
     }

@@ -1,5 +1,3 @@
-use std::any::Any;
-
 use datafusion::arrow::array::StringArray;
 use datafusion::arrow::datatypes::DataType;
 use datafusion::arrow::datatypes::DataType::Utf8;
@@ -33,10 +31,6 @@ impl Default for JsonFormat {
 }
 
 impl ScalarUDFImpl for JsonFormat {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn name(&self) -> &str {
         self.aliases[0].as_str()
     }

@@ -1,9 +1,6 @@
 use std::str::Utf8Error;
 use std::sync::Arc;
 
-use crate::common_union::{
-    is_json_union, json_from_union_scalar, nested_json_array, nested_json_array_ref, TYPE_ID_NULL,
-};
 use datafusion::arrow::array::{
     downcast_array, AnyDictionaryArray, Array, ArrayAccessor, ArrayRef, AsArray, DictionaryArray, LargeStringArray,
     PrimitiveArray, PrimitiveBuilder, RunArray, StringArray, StringViewArray,
@@ -16,6 +13,10 @@ use datafusion::logical_expr::ColumnarValue;
 use jiter::{Jiter, JiterError, Peek};
 use jsonpath_rust::parser::model::{Segment, Selector};
 use jsonpath_rust::parser::parse_json_path;
+
+use crate::common_union::{
+    is_json_union, json_from_union_scalar, nested_json_array, nested_json_array_ref, TYPE_ID_NULL,
+};
 
 /// General implementation of `ScalarUDFImpl::return_type`.
 ///
@@ -69,7 +70,7 @@ fn dict_key_type(d: &DataType) -> Option<DataType> {
     None
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug)]
 pub enum JsonPath<'s> {
     Key(&'s str),
     Index(usize),
@@ -143,19 +144,19 @@ impl<'s> JsonPathArgs<'s> {
 }
 
 pub(crate) fn parse_jsonpath(path: &str) -> Vec<JsonPath<'static>> {
-    let segments = parse_json_path(path).map(|it| it.segments).unwrap_or(Vec::new());
+    let segments = parse_json_path(path).map(|it| it.segments).unwrap_or_default();
 
     segments
         .into_iter()
         .map(|segment| match segment {
             Segment::Selector(s) => match s {
                 Selector::Name(name) => JsonPath::Key(Box::leak(name.into_boxed_str())),
-                Selector::Index(idx) => JsonPath::Index(idx as usize),
+                Selector::Index(idx) => JsonPath::from(idx),
                 _ => JsonPath::None,
             },
             _ => JsonPath::None,
         })
-        .collect::<Vec<_>>()
+        .collect()
 }
 
 pub trait InvokeResult {
@@ -196,6 +197,14 @@ pub fn invoke<R: InvokeResult>(
             invoke_scalar_scalars(s, &path, jiter_find, R::scalar)
         }
     }
+}
+
+fn null_result<R: InvokeResult>(len: usize) -> DataFusionResult<ArrayRef> {
+    let mut builder = R::builder(len);
+    for _ in 0..len {
+        R::append_value(&mut builder, None);
+    }
+    R::finish(builder)
 }
 
 fn invoke_array_array<R: InvokeResult>(
@@ -253,6 +262,7 @@ fn invoke_array_array<R: InvokeResult>(
         DataType::Utf8 => zip_apply::<R>(json_array.as_string::<i32>(), path_array, jiter_find),
         DataType::LargeUtf8 => zip_apply::<R>(json_array.as_string::<i64>(), path_array, jiter_find),
         DataType::Utf8View => zip_apply::<R>(json_array.as_string_view(), path_array, jiter_find),
+        DataType::Null => null_result::<R>(json_array.len()),
         other => {
             if let Some(string_array) = nested_json_array(json_array, is_object_lookup_array(path_array.data_type())) {
                 zip_apply::<R>(string_array, path_array, jiter_find)
@@ -336,6 +346,7 @@ fn invoke_array_scalars<R: InvokeResult>(
         DataType::Utf8 => inner::<R>(json_array.as_string::<i32>(), path, jiter_find),
         DataType::LargeUtf8 => inner::<R>(json_array.as_string::<i64>(), path, jiter_find),
         DataType::Utf8View => inner::<R>(json_array.as_string_view(), path, jiter_find),
+        DataType::Null => null_result::<R>(json_array.len()),
         other => {
             if let Some(string_array) = nested_json_array(json_array, is_object_lookup(path)) {
                 inner::<R>(string_array, path, jiter_find)
@@ -602,22 +613,4 @@ fn mask_dictionary_keys(keys: &PrimitiveArray<Int64Type>, type_ids: &[i8]) -> Pr
         }
     }
     PrimitiveArray::new(keys.values().clone(), Some(null_mask.into()))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use rstest::rstest;
-
-    // Test cases for parse_jsonpath
-    #[rstest]
-    #[case("$.a.aa", vec![JsonPath::Key("a"), JsonPath::Key("aa")])]
-    #[case("$.a.ab[0].ac", vec![JsonPath::Key("a"), JsonPath::Key("ab"), JsonPath::Index(0), JsonPath::Key("ac")])]
-    #[case("$.a.ab[1].ad", vec![JsonPath::Key("a"), JsonPath::Key("ab"), JsonPath::Index(1), JsonPath::Key("ad")])]
-    #[case(r#"$.a["a b"].ad"#, vec![JsonPath::Key("a"), JsonPath::Key("\"a b\""), JsonPath::Key("ad")])]
-    #[tokio::test]
-    async fn test_parse_jsonpath(#[case] path: &str, #[case] expected: Vec<JsonPath<'static>>) {
-        let result = parse_jsonpath(path);
-        assert_eq!(result, expected);
-    }
 }

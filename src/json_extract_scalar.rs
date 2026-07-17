@@ -1,12 +1,8 @@
-use std::any::Any;
-
 use datafusion::arrow::datatypes::DataType;
-use datafusion::common::{exec_err, Result as DataFusionResult};
+use datafusion::common::{exec_err, Result as DataFusionResult, ScalarValue};
 use datafusion::logical_expr::{ColumnarValue, ScalarFunctionArgs, ScalarUDFImpl, Signature, Volatility};
-use datafusion::scalar::ScalarValue;
 
-use crate::common::parse_jsonpath;
-use crate::common::{invoke, return_type_check};
+use crate::common::{invoke, parse_jsonpath, return_type_check};
 use crate::common_macros::make_udf_function;
 use crate::common_union::JsonUnion;
 use crate::json_get::jiter_json_get_union;
@@ -34,10 +30,6 @@ impl Default for JsonExtractScalar {
 }
 
 impl ScalarUDFImpl for JsonExtractScalar {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn name(&self) -> &str {
         self.aliases[0].as_str()
     }
@@ -62,19 +54,23 @@ impl ScalarUDFImpl for JsonExtractScalar {
         let json_arg = &args.args[0];
         let path_arg = &args.args[1];
 
-        let path_str = match path_arg {
-            ColumnarValue::Scalar(ScalarValue::Utf8(Some(s))) => s,
-            _ => {
-                return exec_err!(
-                    "'{}' expects a valid JSONPath string (e.g., '$.key[0]') as second argument",
-                    self.name()
-                )
-            }
+        let ColumnarValue::Scalar(
+            ScalarValue::Utf8(Some(path_str))
+            | ScalarValue::Utf8View(Some(path_str))
+            | ScalarValue::LargeUtf8(Some(path_str)),
+        ) = path_arg
+        else {
+            return exec_err!(
+                "'{}' expects a valid JSONPath string (e.g., '$.key[0]') as second argument",
+                self.name()
+            );
         };
 
         let path = parse_jsonpath(path_str);
 
-        invoke::<JsonUnion>(&[json_arg.clone()], |json, _| jiter_json_get_union(json, &path))
+        invoke::<JsonUnion>(std::slice::from_ref(json_arg), |json, _| {
+            jiter_json_get_union(json, &path)
+        })
     }
 
     fn aliases(&self) -> &[String] {
