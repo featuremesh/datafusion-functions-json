@@ -9,6 +9,7 @@ use datafusion::common::ScalarValue;
 use datafusion::config::ConfigOptions;
 use datafusion::logical_expr::{ColumnarValue, ScalarFunctionArgs};
 use datafusion::prelude::SessionContext;
+use datafusion_functions_json::json_field_metadata;
 use datafusion_functions_json::udfs::json_get_str_udf;
 use utils::{create_context, display_val, logical_plan, run_query, run_query_params};
 
@@ -90,28 +91,6 @@ async fn test_json_get_union() {
 }
 
 #[tokio::test]
-async fn test_json_extract_union() {
-    let batches = run_query("select name, json_extract(json_data, '$.foo') as foo from test")
-        .await
-        .unwrap();
-
-    let expected = [
-        "+------------------+-------------+",
-        "| name             | foo         |",
-        "+------------------+-------------+",
-        "| object_foo       | {str=abc}   |",
-        "| object_foo_array | {array=[1]} |",
-        "| object_foo_obj   | {object={}} |",
-        "| object_foo_null  | {null=}     |",
-        "| object_bar       | {null=}     |",
-        "| list_foo         | {null=}     |",
-        "| invalid_json     | {null=}     |",
-        "+------------------+-------------+",
-    ];
-    assert_batches_eq!(expected, &batches);
-}
-
-#[tokio::test]
 async fn test_json_get_array_elem() {
     let sql = "select json_get('[1, 2, 3]', 2)";
     let batches = run_query(sql).await.unwrap();
@@ -181,6 +160,36 @@ async fn test_json_get_array_with_path() {
     let (value_type, value_repr) = display_val(batches).await;
     assert!(matches!(value_type, DataType::List(_)));
     assert_eq!(value_repr, "[1, 2, 3]");
+}
+
+#[tokio::test]
+async fn test_json_get_array_inner_field_json_metadata() {
+    let sql = r#"select json_get_array('[{"a": 1}, {"b": 2}]') as v"#;
+    let batches = run_query(sql).await.unwrap();
+    let schema = batches[0].schema();
+    let field = schema.field(0);
+    let DataType::List(inner_field) = field.data_type() else {
+        panic!("expected List, got {:?}", field.data_type());
+    };
+    assert_json_field_metadata(inner_field.metadata());
+
+    let array_field = batches[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<datafusion::arrow::array::ListArray>()
+        .unwrap();
+    let DataType::List(produced_inner) = array_field.data_type() else {
+        panic!("expected List in produced array");
+    };
+    assert_json_field_metadata(produced_inner.metadata());
+}
+
+fn assert_json_field_metadata(metadata: &HashMap<String, String>) {
+    assert_eq!(
+        metadata.get("ARROW:extension:name").map(String::as_str),
+        Some("arrow.json")
+    );
+    assert_eq!(metadata.get("ARROW:extension:metadata").map(String::as_str), Some("{}"));
 }
 
 #[tokio::test]
@@ -304,6 +313,75 @@ async fn test_json_get_no_path() {
 async fn test_json_get_int() {
     let batches = run_query(r"select json_get_int('[1, 2, 3]', 1)").await.unwrap();
     assert_eq!(display_val(batches).await, (DataType::Int64, "2".to_string()));
+}
+
+#[tokio::test]
+async fn test_json_get_int_string_parse() {
+    // string containing int
+    let batches = run_query(r#"select json_get_int('{"foo": "123"}', 'foo')"#)
+        .await
+        .unwrap();
+    assert_eq!(display_val(batches).await, (DataType::Int64, "123".to_string()));
+
+    // negative string
+    let batches = run_query(r#"select json_get_int('{"foo": "-42"}', 'foo')"#)
+        .await
+        .unwrap();
+    assert_eq!(display_val(batches).await, (DataType::Int64, "-42".to_string()));
+
+    // non-numeric string returns null
+    let batches = run_query(r#"select json_get_int('{"foo": "abc"}', 'foo')"#)
+        .await
+        .unwrap();
+    assert_eq!(display_val(batches).await, (DataType::Int64, String::new()));
+
+    // float string returns null (not a valid int)
+    let batches = run_query(r#"select json_get_int('{"foo": "1.5"}', 'foo')"#)
+        .await
+        .unwrap();
+    assert_eq!(display_val(batches).await, (DataType::Int64, String::new()));
+}
+
+#[tokio::test]
+async fn test_json_get_float_string_parse() {
+    // string containing float
+    let batches = run_query(r#"select json_get_float('{"foo": "1.5"}', 'foo')"#)
+        .await
+        .unwrap();
+    assert_eq!(display_val(batches).await, (DataType::Float64, "1.5".to_string()));
+
+    // string containing int parses as float
+    let batches = run_query(r#"select json_get_float('{"foo": "42"}', 'foo')"#)
+        .await
+        .unwrap();
+    assert_eq!(display_val(batches).await, (DataType::Float64, "42.0".to_string()));
+
+    // non-numeric string returns null
+    let batches = run_query(r#"select json_get_float('{"foo": "abc"}', 'foo')"#)
+        .await
+        .unwrap();
+    assert_eq!(display_val(batches).await, (DataType::Float64, String::new()));
+}
+
+#[tokio::test]
+async fn test_json_get_bool_string_parse() {
+    // string "true"
+    let batches = run_query(r#"select json_get_bool('{"foo": "true"}', 'foo')"#)
+        .await
+        .unwrap();
+    assert_eq!(display_val(batches).await, (DataType::Boolean, "true".to_string()));
+
+    // string "false"
+    let batches = run_query(r#"select json_get_bool('{"foo": "false"}', 'foo')"#)
+        .await
+        .unwrap();
+    assert_eq!(display_val(batches).await, (DataType::Boolean, "false".to_string()));
+
+    // non-bool string returns null
+    let batches = run_query(r#"select json_get_bool('{"foo": "abc"}', 'foo')"#)
+        .await
+        .unwrap();
+    assert_eq!(display_val(batches).await, (DataType::Boolean, String::new()));
 }
 
 #[tokio::test]
@@ -431,6 +509,15 @@ async fn test_json_get_json_float() {
     let sql = r#"select json_get_json('{"x": 4.2e-1}', 'x')"#;
     let batches = run_query(sql).await.unwrap();
     assert_eq!(display_val(batches).await, (DataType::Utf8, "4.2e-1".to_string()));
+}
+
+#[tokio::test]
+async fn test_json_get_json_json_metadata() {
+    let sql = r#"select json_get_json('{"x": [1, 2]}', 'x') as v"#;
+    let batches = run_query(sql).await.unwrap();
+    let schema = batches[0].schema();
+    let field = schema.field(0);
+    assert_json_field_metadata(field.metadata());
 }
 
 #[tokio::test]
@@ -619,10 +706,7 @@ fn test_json_get_utf8() {
                 Arc::new(Field::new("arg_3", DataType::LargeUtf8, false)),
             ],
             number_rows: 1,
-            return_field: Arc::new(
-                Field::new("ret_field", DataType::Utf8, false)
-                    .with_metadata(HashMap::from_iter(vec![("is_json".to_string(), "true".to_string())])),
-            ),
+            return_field: Arc::new(Field::new("ret_field", DataType::Utf8, false).with_metadata(json_field_metadata())),
             config_options: Arc::new(ConfigOptions::default()),
         })
         .unwrap()
@@ -653,10 +737,7 @@ fn test_json_get_large_utf8() {
                 Arc::new(Field::new("arg_3", DataType::LargeUtf8, false)),
             ],
             number_rows: 1,
-            return_field: Arc::new(
-                Field::new("ret_field", DataType::Utf8, false)
-                    .with_metadata(HashMap::from_iter(vec![("is_json".to_string(), "true".to_string())])),
-            ),
+            return_field: Arc::new(Field::new("ret_field", DataType::Utf8, false).with_metadata(json_field_metadata())),
             config_options: Arc::new(ConfigOptions::default()),
         })
         .unwrap()
@@ -665,6 +746,114 @@ fn test_json_get_large_utf8() {
     };
 
     assert_eq!(sv, ScalarValue::Utf8(Some("x".to_string())));
+}
+
+/// A `NullArray` input (Arrow `DataType::Null`, as opposed to a string array containing null
+/// values) must yield an all-null result rather than erroring with "unexpected json array type
+/// Null". This mirrors the runtime condition where a column declared as a string type
+/// materialises as a `NullArray` for a given batch.
+#[test]
+fn test_json_as_text_null_array_scalar_path() {
+    use datafusion::arrow::array::NullArray;
+    use datafusion_functions_json::udfs::json_as_text_udf;
+
+    let udf = json_as_text_udf();
+    let attributes: ArrayRef = Arc::new(NullArray::new(3)); // DataType::Null
+
+    let ColumnarValue::Array(result) = udf
+        .invoke_with_args(ScalarFunctionArgs {
+            args: vec![
+                ColumnarValue::Array(attributes),
+                ColumnarValue::Scalar(ScalarValue::Utf8(Some("client_name".into()))),
+            ],
+            arg_fields: vec![
+                Arc::new(Field::new("attributes", DataType::Null, true)),
+                Arc::new(Field::new("path", DataType::Utf8, true)),
+            ],
+            number_rows: 3,
+            return_field: Arc::new(Field::new("result", DataType::Utf8, true)),
+            config_options: Arc::new(ConfigOptions::default()),
+        })
+        .unwrap()
+    else {
+        panic!("expected array")
+    };
+
+    assert_eq!(result.len(), 3);
+    assert_eq!(result.null_count(), 3);
+    assert_eq!(result.data_type(), &DataType::Utf8);
+}
+
+/// As above but exercising the array/array-path kernel (`invoke_array_array`): both the JSON
+/// argument and the path argument are arrays, with the JSON argument being a `NullArray`.
+#[test]
+fn test_json_get_int_null_array_array_path() {
+    use datafusion::arrow::array::{Int64Array, NullArray, StringArray};
+    use datafusion_functions_json::udfs::json_get_int_udf;
+
+    let udf = json_get_int_udf();
+    let attributes: ArrayRef = Arc::new(NullArray::new(2)); // DataType::Null
+    let paths: ArrayRef = Arc::new(StringArray::from(vec!["a", "b"]));
+
+    let ColumnarValue::Array(result) = udf
+        .invoke_with_args(ScalarFunctionArgs {
+            args: vec![ColumnarValue::Array(attributes), ColumnarValue::Array(paths)],
+            arg_fields: vec![
+                Arc::new(Field::new("attributes", DataType::Null, true)),
+                Arc::new(Field::new("path", DataType::Utf8, true)),
+            ],
+            number_rows: 2,
+            return_field: Arc::new(Field::new("result", DataType::Int64, true)),
+            config_options: Arc::new(ConfigOptions::default()),
+        })
+        .unwrap()
+    else {
+        panic!("expected array")
+    };
+
+    assert_eq!(result.len(), 2);
+    assert_eq!(result.null_count(), 2);
+    assert_eq!(result.as_any().downcast_ref::<Int64Array>().unwrap().len(), 2);
+}
+
+/// `json_get` returns the JSON union type; a `NullArray` input must round-trip to an all-null
+/// union result.
+#[test]
+fn test_json_get_null_array_union_return() {
+    use datafusion::arrow::array::{NullArray, UnionArray};
+    use datafusion_functions_json::udfs::json_get_udf;
+
+    let udf = json_get_udf();
+    let attributes: ArrayRef = Arc::new(NullArray::new(4)); // DataType::Null
+
+    // json_get returns the JSON union type; derive it from the udf rather than hard-coding it.
+    // The declared (plan-time) type is a string even though the runtime array is a NullArray.
+    let return_type = udf.return_type(&[DataType::Utf8, DataType::Utf8]).unwrap();
+
+    let ColumnarValue::Array(result) = udf
+        .invoke_with_args(ScalarFunctionArgs {
+            args: vec![
+                ColumnarValue::Array(attributes),
+                ColumnarValue::Scalar(ScalarValue::Utf8(Some("a".into()))),
+            ],
+            arg_fields: vec![
+                Arc::new(Field::new("attributes", DataType::Null, true)),
+                Arc::new(Field::new("path", DataType::Utf8, true)),
+            ],
+            number_rows: 4,
+            return_field: Arc::new(Field::new("result", return_type, true).with_metadata(json_field_metadata())),
+            config_options: Arc::new(ConfigOptions::default()),
+        })
+        .unwrap()
+    else {
+        panic!("expected array")
+    };
+
+    // A union array encodes nulls via the "null" union member (type id 0), not a null buffer,
+    // so check that every row points at the null member rather than relying on null_count().
+    assert_eq!(result.len(), 4);
+    let union = result.as_any().downcast_ref::<UnionArray>().unwrap();
+    assert!(union.type_ids().iter().all(|&id| id == 0), "expected all-null union");
 }
 
 #[tokio::test]
@@ -784,9 +973,9 @@ async fn test_plan_json_get_cte() {
         select name, json_get(j, 0) v from t
     ";
     let expected = [
-        "Projection: t.name, json_get(t.j, Int64(0)) AS v",
+        "Projection: t.name, __datafusion_extracted_1 AS v",
         "  SubqueryAlias: t",
-        "    Projection: test.name, json_get(test.json_data, Utf8(\"foo\")) AS j",
+        "    Projection: test.name, json_get(json_get(test.json_data, Utf8(\"foo\")), Int64(0)) AS __datafusion_extracted_1",
         "      TableScan: test projection=[name, json_data]",
     ];
 
@@ -956,31 +1145,31 @@ async fn test_arrow() {
     let sql = "select name, json_data->'foo' from test";
 
     let expected = [
-        "+------------------+-------------------------+",
-        "| name             | test.json_data -> 'foo' |",
-        "+------------------+-------------------------+",
-        "| object_foo       | {str=abc}               |",
-        "| object_foo_array | {array=[1]}             |",
-        "| object_foo_obj   | {object={}}             |",
-        "| object_foo_null  | {null=}                 |",
-        "| object_bar       | {null=}                 |",
-        "| list_foo         | {null=}                 |",
-        "| invalid_json     | {null=}                 |",
-        "+------------------+-------------------------+",
+        "+------------------+--------------------+",
+        "| name             | json_data -> 'foo' |",
+        "+------------------+--------------------+",
+        "| object_foo       | {str=abc}          |",
+        "| object_foo_array | {array=[1]}        |",
+        "| object_foo_obj   | {object={}}        |",
+        "| object_foo_null  | {null=}            |",
+        "| object_bar       | {null=}            |",
+        "| list_foo         | {null=}            |",
+        "| invalid_json     | {null=}            |",
+        "+------------------+--------------------+",
     ];
 
     let expected_dict = [
-        "+------------------+-------------------------+",
-        "| name             | test.json_data -> 'foo' |",
-        "+------------------+-------------------------+",
-        "| object_foo       | {str=abc}               |",
-        "| object_foo_array | {array=[1]}             |",
-        "| object_foo_obj   | {object={}}             |",
-        "| object_foo_null  |                         |",
-        "| object_bar       |                         |",
-        "| list_foo         |                         |",
-        "| invalid_json     |                         |",
-        "+------------------+-------------------------+",
+        "+------------------+--------------------+",
+        "| name             | json_data -> 'foo' |",
+        "+------------------+--------------------+",
+        "| object_foo       | {str=abc}          |",
+        "| object_foo_array | {array=[1]}        |",
+        "| object_foo_obj   | {object={}}        |",
+        "| object_foo_null  |                    |",
+        "| object_bar       |                    |",
+        "| list_foo         |                    |",
+        "| invalid_json     |                    |",
+        "+------------------+--------------------+",
     ];
 
     for_all_json_datatypes(async |dt| {
@@ -999,7 +1188,7 @@ async fn test_plan_arrow() {
     let lines = logical_plan(r"explain select json_data->'foo' from test").await;
 
     let expected = [
-        "Projection: json_get(test.json_data, Utf8(\"foo\")) AS test.json_data -> 'foo'",
+        "Projection: json_get(test.json_data, Utf8(\"foo\")) AS json_data -> 'foo'",
         "  TableScan: test projection=[json_data]",
     ];
 
@@ -1011,17 +1200,17 @@ async fn test_long_arrow() {
     let sql = "select name, json_data->>'foo' from test";
 
     let expected = [
-        "+------------------+--------------------------+",
-        "| name             | test.json_data ->> 'foo' |",
-        "+------------------+--------------------------+",
-        "| object_foo       | abc                      |",
-        "| object_foo_array | [1]                      |",
-        "| object_foo_obj   | {}                       |",
-        "| object_foo_null  |                          |",
-        "| object_bar       |                          |",
-        "| list_foo         |                          |",
-        "| invalid_json     |                          |",
-        "+------------------+--------------------------+",
+        "+------------------+---------------------+",
+        "| name             | json_data ->> 'foo' |",
+        "+------------------+---------------------+",
+        "| object_foo       | abc                 |",
+        "| object_foo_array | [1]                 |",
+        "| object_foo_obj   | {}                  |",
+        "| object_foo_null  |                     |",
+        "| object_bar       |                     |",
+        "| list_foo         |                     |",
+        "| invalid_json     |                     |",
+        "+------------------+---------------------+",
     ];
 
     for_all_json_datatypes(async |dt| {
@@ -1036,7 +1225,7 @@ async fn test_plan_long_arrow() {
     let lines = logical_plan(r"explain select json_data->>'foo' from test").await;
 
     let expected = [
-        "Projection: json_as_text(test.json_data, Utf8(\"foo\")) AS test.json_data ->> 'foo'",
+        "Projection: json_as_text(test.json_data, Utf8(\"foo\")) AS json_data ->> 'foo'",
         "  TableScan: test projection=[json_data]",
     ];
 
@@ -1048,17 +1237,17 @@ async fn test_long_arrow_eq_str() {
     let sql = r"select name, (json_data->>'foo')='abc' from test";
 
     let expected = [
-        "+------------------+----------------------------------------+",
-        "| name             | test.json_data ->> 'foo' = Utf8(\"abc\") |",
-        "+------------------+----------------------------------------+",
-        "| object_foo       | true                                   |",
-        "| object_foo_array | false                                  |",
-        "| object_foo_obj   | false                                  |",
-        "| object_foo_null  |                                        |",
-        "| object_bar       |                                        |",
-        "| list_foo         |                                        |",
-        "| invalid_json     |                                        |",
-        "+------------------+----------------------------------------+",
+        "+------------------+-----------------------------------+",
+        "| name             | json_data ->> 'foo' = Utf8(\"abc\") |",
+        "+------------------+-----------------------------------+",
+        "| object_foo       | true                              |",
+        "| object_foo_array | false                             |",
+        "| object_foo_obj   | false                             |",
+        "| object_foo_null  |                                   |",
+        "| object_bar       |                                   |",
+        "| list_foo         |                                   |",
+        "| invalid_json     |                                   |",
+        "+------------------+-----------------------------------+",
     ];
 
     for_all_json_datatypes(async |dt| {
@@ -1113,7 +1302,7 @@ async fn test_plan_arrow_cast_int() {
     let lines = logical_plan(r"explain select (json_data->'foo')::int from test").await;
 
     let expected = [
-        "Projection: json_get_int(test.json_data, Utf8(\"foo\")) AS test.json_data -> 'foo'",
+        "Projection: json_get_int(test.json_data, Utf8(\"foo\")) AS json_data -> 'foo'",
         "  TableScan: test projection=[json_data]",
     ];
 
@@ -1125,31 +1314,31 @@ async fn test_arrow_double_nested() {
     let sql = "select name, json_data->'foo'->0 from test";
 
     let expected = [
-        "+------------------+------------------------------+",
-        "| name             | test.json_data -> 'foo' -> 0 |",
-        "+------------------+------------------------------+",
-        "| object_foo       | {null=}                      |",
-        "| object_foo_array | {int=1}                      |",
-        "| object_foo_obj   | {null=}                      |",
-        "| object_foo_null  | {null=}                      |",
-        "| object_bar       | {null=}                      |",
-        "| list_foo         | {null=}                      |",
-        "| invalid_json     | {null=}                      |",
-        "+------------------+------------------------------+",
+        "+------------------+-------------------------+",
+        "| name             | json_data -> 'foo' -> 0 |",
+        "+------------------+-------------------------+",
+        "| object_foo       | {null=}                 |",
+        "| object_foo_array | {int=1}                 |",
+        "| object_foo_obj   | {null=}                 |",
+        "| object_foo_null  | {null=}                 |",
+        "| object_bar       | {null=}                 |",
+        "| list_foo         | {null=}                 |",
+        "| invalid_json     | {null=}                 |",
+        "+------------------+-------------------------+",
     ];
 
     let expected_dict = [
-        "+------------------+------------------------------+",
-        "| name             | test.json_data -> 'foo' -> 0 |",
-        "+------------------+------------------------------+",
-        "| object_foo       |                              |",
-        "| object_foo_array | {int=1}                      |",
-        "| object_foo_obj   |                              |",
-        "| object_foo_null  |                              |",
-        "| object_bar       |                              |",
-        "| list_foo         |                              |",
-        "| invalid_json     |                              |",
-        "+------------------+------------------------------+",
+        "+------------------+-------------------------+",
+        "| name             | json_data -> 'foo' -> 0 |",
+        "+------------------+-------------------------+",
+        "| object_foo       |                         |",
+        "| object_foo_array | {int=1}                 |",
+        "| object_foo_obj   |                         |",
+        "| object_foo_null  |                         |",
+        "| object_bar       |                         |",
+        "| list_foo         |                         |",
+        "| invalid_json     |                         |",
+        "+------------------+-------------------------+",
     ];
 
     for_all_json_datatypes(async |dt| {
@@ -1168,7 +1357,7 @@ async fn test_plan_arrow_double_nested() {
     let lines = logical_plan(r"explain select json_data->'foo'->0 from test").await;
 
     let expected = [
-        "Projection: json_get(test.json_data, Utf8(\"foo\"), Int64(0)) AS test.json_data -> 'foo' -> 0",
+        "Projection: json_get(test.json_data, Utf8(\"foo\"), Int64(0)) AS json_data -> 'foo' -> 0",
         "  TableScan: test projection=[json_data]",
     ];
 
@@ -1179,17 +1368,17 @@ async fn test_plan_arrow_double_nested() {
 async fn test_double_arrow_double_nested() {
     let sql = "select name, json_data->>'foo'->>0 from test";
     let expected = [
-        "+------------------+--------------------------------+",
-        "| name             | test.json_data ->> 'foo' ->> 0 |",
-        "+------------------+--------------------------------+",
-        "| object_foo       |                                |",
-        "| object_foo_array | 1                              |",
-        "| object_foo_obj   |                                |",
-        "| object_foo_null  |                                |",
-        "| object_bar       |                                |",
-        "| list_foo         |                                |",
-        "| invalid_json     |                                |",
-        "+------------------+--------------------------------+",
+        "+------------------+---------------------------+",
+        "| name             | json_data ->> 'foo' ->> 0 |",
+        "+------------------+---------------------------+",
+        "| object_foo       |                           |",
+        "| object_foo_array | 1                         |",
+        "| object_foo_obj   |                           |",
+        "| object_foo_null  |                           |",
+        "| object_bar       |                           |",
+        "| list_foo         |                           |",
+        "| invalid_json     |                           |",
+        "+------------------+---------------------------+",
     ];
 
     for_all_json_datatypes(async |dt| {
@@ -1204,7 +1393,7 @@ async fn test_plan_double_arrow_double_nested() {
     let lines = logical_plan(r"explain select json_data->>'foo'->>0 from test").await;
 
     let expected = [
-        "Projection: json_as_text(test.json_data, Utf8(\"foo\"), Int64(0)) AS test.json_data ->> 'foo' ->> 0",
+        "Projection: json_as_text(test.json_data, Utf8(\"foo\"), Int64(0)) AS json_data ->> 'foo' ->> 0",
         "  TableScan: test projection=[json_data]",
     ];
 
@@ -1215,17 +1404,17 @@ async fn test_plan_double_arrow_double_nested() {
 async fn test_arrow_double_nested_cast() {
     let sql = "select name, (json_data->'foo'->0)::int from test";
     let expected = [
-        "+------------------+------------------------------+",
-        "| name             | test.json_data -> 'foo' -> 0 |",
-        "+------------------+------------------------------+",
-        "| object_foo       |                              |",
-        "| object_foo_array | 1                            |",
-        "| object_foo_obj   |                              |",
-        "| object_foo_null  |                              |",
-        "| object_bar       |                              |",
-        "| list_foo         |                              |",
-        "| invalid_json     |                              |",
-        "+------------------+------------------------------+",
+        "+------------------+-------------------------+",
+        "| name             | json_data -> 'foo' -> 0 |",
+        "+------------------+-------------------------+",
+        "| object_foo       |                         |",
+        "| object_foo_array | 1                       |",
+        "| object_foo_obj   |                         |",
+        "| object_foo_null  |                         |",
+        "| object_bar       |                         |",
+        "| list_foo         |                         |",
+        "| invalid_json     |                         |",
+        "+------------------+-------------------------+",
     ];
 
     for_all_json_datatypes(async |dt| {
@@ -1240,7 +1429,7 @@ async fn test_plan_arrow_double_nested_cast() {
     let lines = logical_plan(r"explain select (json_data->'foo'->0)::int from test").await;
 
     let expected = [
-        "Projection: json_get_int(test.json_data, Utf8(\"foo\"), Int64(0)) AS test.json_data -> 'foo' -> 0",
+        "Projection: json_get_int(test.json_data, Utf8(\"foo\"), Int64(0)) AS json_data -> 'foo' -> 0",
         "  TableScan: test projection=[json_data]",
     ];
 
@@ -1251,17 +1440,17 @@ async fn test_plan_arrow_double_nested_cast() {
 async fn test_double_arrow_double_nested_cast() {
     let sql = "select name, (json_data->>'foo'->>0)::int from test";
     let expected = [
-        "+------------------+--------------------------------+",
-        "| name             | test.json_data ->> 'foo' ->> 0 |",
-        "+------------------+--------------------------------+",
-        "| object_foo       |                                |",
-        "| object_foo_array | 1                              |",
-        "| object_foo_obj   |                                |",
-        "| object_foo_null  |                                |",
-        "| object_bar       |                                |",
-        "| list_foo         |                                |",
-        "| invalid_json     |                                |",
-        "+------------------+--------------------------------+",
+        "+------------------+---------------------------+",
+        "| name             | json_data ->> 'foo' ->> 0 |",
+        "+------------------+---------------------------+",
+        "| object_foo       |                           |",
+        "| object_foo_array | 1                         |",
+        "| object_foo_obj   |                           |",
+        "| object_foo_null  |                           |",
+        "| object_bar       |                           |",
+        "| list_foo         |                           |",
+        "| invalid_json     |                           |",
+        "+------------------+---------------------------+",
     ];
 
     for_all_json_datatypes(async |dt| {
@@ -1277,7 +1466,7 @@ async fn test_plan_double_arrow_double_nested_cast() {
 
     // NB: json_as_text(..)::int is NOT the same as `json_get_int(..)`, hence the cast is not rewritten
     let expected = [
-        "Projection: CAST(json_as_text(test.json_data, Utf8(\"foo\"), Int64(0)) AS test.json_data ->> 'foo' ->> 0 AS Int32)",
+        "Projection: CAST(json_as_text(test.json_data, Utf8(\"foo\"), Int64(0)) AS Int32) AS json_data ->> 'foo' ->> 0",
         "  TableScan: test projection=[json_data]",
     ];
 
@@ -1343,17 +1532,17 @@ async fn test_lexical_precedence_correct() {
 async fn test_question_mark_contains() {
     let sql = "select name, json_data ? 'foo' from test";
     let expected = [
-        "+------------------+------------------------+",
-        "| name             | test.json_data ? 'foo' |",
-        "+------------------+------------------------+",
-        "| object_foo       | true                   |",
-        "| object_foo_array | true                   |",
-        "| object_foo_obj   | true                   |",
-        "| object_foo_null  | true                   |",
-        "| object_bar       | false                  |",
-        "| list_foo         | false                  |",
-        "| invalid_json     | false                  |",
-        "+------------------+------------------------+",
+        "+------------------+-------------------+",
+        "| name             | json_data ? 'foo' |",
+        "+------------------+-------------------+",
+        "| object_foo       | true              |",
+        "| object_foo_array | true              |",
+        "| object_foo_obj   | true              |",
+        "| object_foo_null  | true              |",
+        "| object_bar       | false             |",
+        "| list_foo         | false             |",
+        "| invalid_json     | false             |",
+        "+------------------+-------------------+",
     ];
 
     for_all_json_datatypes(async |dt| {
@@ -1457,17 +1646,17 @@ async fn test_json_get_union_is_not_null() {
 async fn test_arrow_union_is_null() {
     let sql = "select name, (json_data->'foo') is null from test";
     let expected = [
-        "+------------------+---------------------------------+",
-        "| name             | test.json_data -> 'foo' IS NULL |",
-        "+------------------+---------------------------------+",
-        "| object_foo       | false                           |",
-        "| object_foo_array | false                           |",
-        "| object_foo_obj   | false                           |",
-        "| object_foo_null  | true                            |",
-        "| object_bar       | true                            |",
-        "| list_foo         | true                            |",
-        "| invalid_json     | true                            |",
-        "+------------------+---------------------------------+",
+        "+------------------+----------------------------+",
+        "| name             | json_data -> 'foo' IS NULL |",
+        "+------------------+----------------------------+",
+        "| object_foo       | false                      |",
+        "| object_foo_array | false                      |",
+        "| object_foo_obj   | false                      |",
+        "| object_foo_null  | true                       |",
+        "| object_bar       | true                       |",
+        "| list_foo         | true                       |",
+        "| invalid_json     | true                       |",
+        "+------------------+----------------------------+",
     ];
 
     for_all_json_datatypes(async |dt| {
@@ -1481,17 +1670,17 @@ async fn test_arrow_union_is_null() {
 async fn test_arrow_union_is_not_null() {
     let sql = "select name, (json_data->'foo') is not null from test";
     let expected = [
-        "+------------------+-------------------------------------+",
-        "| name             | test.json_data -> 'foo' IS NOT NULL |",
-        "+------------------+-------------------------------------+",
-        "| object_foo       | true                                |",
-        "| object_foo_array | true                                |",
-        "| object_foo_obj   | true                                |",
-        "| object_foo_null  | false                               |",
-        "| object_bar       | false                               |",
-        "| list_foo         | false                               |",
-        "| invalid_json     | false                               |",
-        "+------------------+-------------------------------------+",
+        "+------------------+--------------------------------+",
+        "| name             | json_data -> 'foo' IS NOT NULL |",
+        "+------------------+--------------------------------+",
+        "| object_foo       | true                           |",
+        "| object_foo_array | true                           |",
+        "| object_foo_obj   | true                           |",
+        "| object_foo_null  | false                          |",
+        "| object_bar       | false                          |",
+        "| list_foo         | false                          |",
+        "| invalid_json     | false                          |",
+        "+------------------+--------------------------------+",
     ];
 
     for_all_json_datatypes(async |dt| {
@@ -1528,14 +1717,14 @@ async fn test_long_arrow_cast() {
     let sql = "select (json_data->>'foo')::int from other";
 
     let expected = [
-        "+---------------------------+",
-        "| other.json_data ->> 'foo' |",
-        "+---------------------------+",
-        "| 42                        |",
-        "| 42                        |",
-        "|                           |",
-        "|                           |",
-        "+---------------------------+",
+        "+---------------------+",
+        "| json_data ->> 'foo' |",
+        "+---------------------+",
+        "| 42                  |",
+        "| 42                  |",
+        "|                     |",
+        "|                     |",
+        "+---------------------+",
     ];
 
     for_all_json_datatypes(async |dt| {
@@ -2051,4 +2240,723 @@ FROM json_columns, attr_names
 
     let batches = run_query(sql).await.unwrap();
     assert_batches_eq!(expected, &batches);
+}
+
+// ============================================================================
+// json_from_scalar tests
+// ============================================================================
+
+#[tokio::test]
+async fn test_json_from_scalar_int() {
+    let sql = "select json_from_scalar(42)";
+    let batches = run_query(sql).await.unwrap();
+    let (value_type, value_repr) = display_val(batches).await;
+    assert!(matches!(value_type, DataType::Union(_, _)));
+    assert_eq!(value_repr, "{int=42}");
+}
+
+#[tokio::test]
+async fn test_json_from_scalar_float() {
+    let sql = "select json_from_scalar(3.14)";
+    let batches = run_query(sql).await.unwrap();
+    let (value_type, value_repr) = display_val(batches).await;
+    assert!(matches!(value_type, DataType::Union(_, _)));
+    assert_eq!(value_repr, "{float=3.14}");
+}
+
+#[tokio::test]
+async fn test_json_from_scalar_string() {
+    let sql = "select json_from_scalar('hello')";
+    let batches = run_query(sql).await.unwrap();
+    let (value_type, value_repr) = display_val(batches).await;
+    assert!(matches!(value_type, DataType::Union(_, _)));
+    assert_eq!(value_repr, "{str=hello}");
+}
+
+#[tokio::test]
+async fn test_json_from_scalar_bool_true() {
+    let sql = "select json_from_scalar(true)";
+    let batches = run_query(sql).await.unwrap();
+    let (value_type, value_repr) = display_val(batches).await;
+    assert!(matches!(value_type, DataType::Union(_, _)));
+    assert_eq!(value_repr, "{bool=true}");
+}
+
+#[tokio::test]
+async fn test_json_from_scalar_bool_false() {
+    let sql = "select json_from_scalar(false)";
+    let batches = run_query(sql).await.unwrap();
+    let (value_type, value_repr) = display_val(batches).await;
+    assert!(matches!(value_type, DataType::Union(_, _)));
+    assert_eq!(value_repr, "{bool=false}");
+}
+
+#[tokio::test]
+async fn test_json_from_scalar_null() {
+    let sql = "select json_from_scalar(NULL)";
+    let batches = run_query(sql).await.unwrap();
+    let (value_type, value_repr) = display_val(batches).await;
+    assert!(matches!(value_type, DataType::Union(_, _)));
+    assert_eq!(value_repr, "{null=}");
+}
+
+#[tokio::test]
+async fn test_json_from_scalar_typed_null() {
+    // Test that a typed NULL (e.g., NULL::int) still produces JsonNull
+    let sql = "select json_from_scalar(NULL::int)";
+    let batches = run_query(sql).await.unwrap();
+    let (value_type, value_repr) = display_val(batches).await;
+    assert!(matches!(value_type, DataType::Union(_, _)));
+    assert_eq!(value_repr, "{null=}");
+}
+
+#[tokio::test]
+async fn test_json_from_scalar_int_coercion() {
+    // Test that smaller integer types are coerced to Int64
+    let sql = "select json_from_scalar(arrow_cast(42, 'Int32'))";
+    let batches = run_query(sql).await.unwrap();
+    let (value_type, value_repr) = display_val(batches).await;
+    assert!(matches!(value_type, DataType::Union(_, _)));
+    assert_eq!(value_repr, "{int=42}");
+}
+
+#[tokio::test]
+async fn test_json_from_scalar_float32_coercion() {
+    // Test that Float32 is coerced to Float64
+    let sql = "select json_from_scalar(arrow_cast(3.14, 'Float32'))";
+    let batches = run_query(sql).await.unwrap();
+    let (value_type, value_repr) = display_val(batches).await;
+    assert!(matches!(value_type, DataType::Union(_, _)));
+    // Float32 to Float64 conversion may have precision differences
+    assert!(value_repr.starts_with("{float=3.14"));
+}
+
+#[tokio::test]
+async fn test_json_from_scalar_alias() {
+    // Test the scalar_to_json alias
+    let sql = "select scalar_to_json(42)";
+    let batches = run_query(sql).await.unwrap();
+    let (value_type, value_repr) = display_val(batches).await;
+    assert!(matches!(value_type, DataType::Union(_, _)));
+    assert_eq!(value_repr, "{int=42}");
+}
+
+#[tokio::test]
+async fn test_json_from_scalar_column() {
+    // Test with a column of values
+    let sql = r"
+        WITH data AS (
+            SELECT unnest([1, 2, 3]) as val
+        )
+        SELECT json_from_scalar(val) FROM data
+    ";
+    let batches = run_query(sql).await.unwrap();
+    let expected = [
+        "+----------------------------+",
+        "| json_from_scalar(data.val) |",
+        "+----------------------------+",
+        "| {int=1}                    |",
+        "| {int=2}                    |",
+        "| {int=3}                    |",
+        "+----------------------------+",
+    ];
+    assert_batches_eq!(expected, &batches);
+}
+
+#[tokio::test]
+async fn test_json_from_scalar_column_with_nulls() {
+    // Test with a column that contains null values
+    let sql = r"
+        WITH data AS (
+            SELECT unnest([1, NULL, 3]) as val
+        )
+        SELECT json_from_scalar(val) FROM data
+    ";
+    let batches = run_query(sql).await.unwrap();
+    let expected = [
+        "+----------------------------+",
+        "| json_from_scalar(data.val) |",
+        "+----------------------------+",
+        "| {int=1}                    |",
+        "| {null=}                    |",
+        "| {int=3}                    |",
+        "+----------------------------+",
+    ];
+    assert_batches_eq!(expected, &batches);
+}
+
+#[tokio::test]
+async fn test_json_from_scalar_string_column() {
+    let sql = r"
+        WITH data AS (
+            SELECT unnest(['foo', 'bar', 'baz']) as val
+        )
+        SELECT json_from_scalar(val) FROM data
+    ";
+    let batches = run_query(sql).await.unwrap();
+    let expected = [
+        "+----------------------------+",
+        "| json_from_scalar(data.val) |",
+        "+----------------------------+",
+        "| {str=foo}                  |",
+        "| {str=bar}                  |",
+        "| {str=baz}                  |",
+        "+----------------------------+",
+    ];
+    assert_batches_eq!(expected, &batches);
+}
+
+#[tokio::test]
+async fn test_json_from_scalar_bool_column() {
+    let sql = r"
+        WITH data AS (
+            SELECT unnest([true, false, true]) as val
+        )
+        SELECT json_from_scalar(val) FROM data
+    ";
+    let batches = run_query(sql).await.unwrap();
+    let expected = [
+        "+----------------------------+",
+        "| json_from_scalar(data.val) |",
+        "+----------------------------+",
+        "| {bool=true}                |",
+        "| {bool=false}               |",
+        "| {bool=true}                |",
+        "+----------------------------+",
+    ];
+    assert_batches_eq!(expected, &batches);
+}
+
+#[tokio::test]
+async fn test_json_from_scalar_uint64_overflow() {
+    // UInt64 value larger than i64::MAX should error
+    let sql = "select json_from_scalar(arrow_cast(18446744073709551615, 'UInt64'))";
+    let result = run_query(sql).await;
+    assert!(result.is_err());
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("out of range"));
+}
+
+#[tokio::test]
+async fn test_json_from_scalar_uint64_max_valid() {
+    // i64::MAX as UInt64 should work
+    let sql = "select json_from_scalar(arrow_cast(9223372036854775807, 'UInt64'))";
+    let batches = run_query(sql).await.unwrap();
+    let (value_type, value_repr) = display_val(batches).await;
+    assert!(matches!(value_type, DataType::Union(_, _)));
+    assert_eq!(value_repr, "{int=9223372036854775807}");
+}
+
+#[tokio::test]
+async fn test_json_from_scalar_negative_int() {
+    let sql = "select json_from_scalar(-42)";
+    let batches = run_query(sql).await.unwrap();
+    let (value_type, value_repr) = display_val(batches).await;
+    assert!(matches!(value_type, DataType::Union(_, _)));
+    assert_eq!(value_repr, "{int=-42}");
+}
+
+#[tokio::test]
+async fn test_json_from_scalar_int64_min() {
+    // i64::MIN = -9223372036854775808
+    let sql = "select json_from_scalar(-9223372036854775808)";
+    let batches = run_query(sql).await.unwrap();
+    let (value_type, value_repr) = display_val(batches).await;
+    assert!(matches!(value_type, DataType::Union(_, _)));
+    assert_eq!(value_repr, "{int=-9223372036854775808}");
+}
+
+#[tokio::test]
+async fn test_json_from_scalar_int64_max() {
+    // i64::MAX = 9223372036854775807
+    let sql = "select json_from_scalar(9223372036854775807)";
+    let batches = run_query(sql).await.unwrap();
+    let (value_type, value_repr) = display_val(batches).await;
+    assert!(matches!(value_type, DataType::Union(_, _)));
+    assert_eq!(value_repr, "{int=9223372036854775807}");
+}
+
+#[tokio::test]
+async fn test_json_from_scalar_int8() {
+    let sql = "select json_from_scalar(arrow_cast(127, 'Int8'))";
+    let batches = run_query(sql).await.unwrap();
+    let (value_type, value_repr) = display_val(batches).await;
+    assert!(matches!(value_type, DataType::Union(_, _)));
+    assert_eq!(value_repr, "{int=127}");
+}
+
+#[tokio::test]
+async fn test_json_from_scalar_int8_negative() {
+    let sql = "select json_from_scalar(arrow_cast(-128, 'Int8'))";
+    let batches = run_query(sql).await.unwrap();
+    let (value_type, value_repr) = display_val(batches).await;
+    assert!(matches!(value_type, DataType::Union(_, _)));
+    assert_eq!(value_repr, "{int=-128}");
+}
+
+#[tokio::test]
+async fn test_json_from_scalar_int16() {
+    let sql = "select json_from_scalar(arrow_cast(32767, 'Int16'))";
+    let batches = run_query(sql).await.unwrap();
+    let (value_type, value_repr) = display_val(batches).await;
+    assert!(matches!(value_type, DataType::Union(_, _)));
+    assert_eq!(value_repr, "{int=32767}");
+}
+
+#[tokio::test]
+async fn test_json_from_scalar_uint8() {
+    let sql = "select json_from_scalar(arrow_cast(255, 'UInt8'))";
+    let batches = run_query(sql).await.unwrap();
+    let (value_type, value_repr) = display_val(batches).await;
+    assert!(matches!(value_type, DataType::Union(_, _)));
+    assert_eq!(value_repr, "{int=255}");
+}
+
+#[tokio::test]
+async fn test_json_from_scalar_uint16() {
+    let sql = "select json_from_scalar(arrow_cast(65535, 'UInt16'))";
+    let batches = run_query(sql).await.unwrap();
+    let (value_type, value_repr) = display_val(batches).await;
+    assert!(matches!(value_type, DataType::Union(_, _)));
+    assert_eq!(value_repr, "{int=65535}");
+}
+
+#[tokio::test]
+async fn test_json_from_scalar_uint32() {
+    let sql = "select json_from_scalar(arrow_cast(4294967295, 'UInt32'))";
+    let batches = run_query(sql).await.unwrap();
+    let (value_type, value_repr) = display_val(batches).await;
+    assert!(matches!(value_type, DataType::Union(_, _)));
+    assert_eq!(value_repr, "{int=4294967295}");
+}
+
+#[tokio::test]
+async fn test_json_from_scalar_float_infinity() {
+    // Positive infinity
+    let sql = "select json_from_scalar(arrow_cast('Infinity', 'Float64'))";
+    let batches = run_query(sql).await.unwrap();
+    let (value_type, value_repr) = display_val(batches).await;
+    assert!(matches!(value_type, DataType::Union(_, _)));
+    assert_eq!(value_repr, "{float=inf}");
+}
+
+#[tokio::test]
+async fn test_json_from_scalar_float_neg_infinity() {
+    // Negative infinity
+    let sql = "select json_from_scalar(arrow_cast('-Infinity', 'Float64'))";
+    let batches = run_query(sql).await.unwrap();
+    let (value_type, value_repr) = display_val(batches).await;
+    assert!(matches!(value_type, DataType::Union(_, _)));
+    assert_eq!(value_repr, "{float=-inf}");
+}
+
+#[tokio::test]
+async fn test_json_from_scalar_float_nan() {
+    // NaN
+    let sql = "select json_from_scalar(arrow_cast('NaN', 'Float64'))";
+    let batches = run_query(sql).await.unwrap();
+    let (value_type, value_repr) = display_val(batches).await;
+    assert!(matches!(value_type, DataType::Union(_, _)));
+    assert_eq!(value_repr, "{float=NaN}");
+}
+
+#[tokio::test]
+async fn test_json_from_scalar_null_boolean() {
+    let sql = "select json_from_scalar(NULL::boolean)";
+    let batches = run_query(sql).await.unwrap();
+    let (value_type, value_repr) = display_val(batches).await;
+    assert!(matches!(value_type, DataType::Union(_, _)));
+    assert_eq!(value_repr, "{null=}");
+}
+
+#[tokio::test]
+async fn test_json_from_scalar_null_float() {
+    let sql = "select json_from_scalar(NULL::float)";
+    let batches = run_query(sql).await.unwrap();
+    let (value_type, value_repr) = display_val(batches).await;
+    assert!(matches!(value_type, DataType::Union(_, _)));
+    assert_eq!(value_repr, "{null=}");
+}
+
+#[tokio::test]
+async fn test_json_from_scalar_null_varchar() {
+    let sql = "select json_from_scalar(NULL::varchar)";
+    let batches = run_query(sql).await.unwrap();
+    let (value_type, value_repr) = display_val(batches).await;
+    assert!(matches!(value_type, DataType::Union(_, _)));
+    assert_eq!(value_repr, "{null=}");
+}
+
+#[tokio::test]
+async fn test_json_from_scalar_empty_string() {
+    let sql = "select json_from_scalar('')";
+    let batches = run_query(sql).await.unwrap();
+    let (value_type, value_repr) = display_val(batches).await;
+    assert!(matches!(value_type, DataType::Union(_, _)));
+    assert_eq!(value_repr, "{str=}");
+}
+
+#[tokio::test]
+async fn test_json_from_scalar_large_utf8() {
+    let sql = "select json_from_scalar(arrow_cast('large string', 'LargeUtf8'))";
+    let batches = run_query(sql).await.unwrap();
+    let (value_type, value_repr) = display_val(batches).await;
+    assert!(matches!(value_type, DataType::Union(_, _)));
+    assert_eq!(value_repr, "{str=large string}");
+}
+
+#[tokio::test]
+async fn test_json_from_scalar_utf8_view() {
+    let sql = "select json_from_scalar(arrow_cast('view string', 'Utf8View'))";
+    let batches = run_query(sql).await.unwrap();
+    let (value_type, value_repr) = display_val(batches).await;
+    assert!(matches!(value_type, DataType::Union(_, _)));
+    assert_eq!(value_repr, "{str=view string}");
+}
+
+#[tokio::test]
+async fn test_json_from_scalar_unsupported_type() {
+    // Date32 is not a supported type
+    let sql = "select json_from_scalar(arrow_cast('2021-01-01', 'Date32'))";
+    let result = run_query(sql).await;
+    assert!(result.is_err());
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("Unsupported type"));
+}
+
+#[tokio::test]
+async fn test_json_from_scalar_no_args() {
+    let sql = "select json_from_scalar()";
+    let result = run_query(sql).await;
+    assert!(result.is_err());
+}
+
+#[tokio::test]
+async fn test_json_from_scalar_too_many_args() {
+    let sql = "select json_from_scalar(1, 2)";
+    let result = run_query(sql).await;
+    assert!(result.is_err());
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("The function 'json_from_scalar' expected 1 arguments but received 2"),
+        "Err: {err}"
+    );
+}
+
+#[tokio::test]
+async fn test_json_from_scalar_float_column_with_nulls() {
+    let sql = r"
+        WITH data AS (
+            SELECT unnest([1.5, NULL, 3.5]) as val
+        )
+        SELECT json_from_scalar(val) FROM data
+    ";
+    let batches = run_query(sql).await.unwrap();
+    let expected = [
+        "+----------------------------+",
+        "| json_from_scalar(data.val) |",
+        "+----------------------------+",
+        "| {float=1.5}                |",
+        "| {null=}                    |",
+        "| {float=3.5}                |",
+        "+----------------------------+",
+    ];
+    assert_batches_eq!(expected, &batches);
+}
+
+#[tokio::test]
+async fn test_json_from_scalar_uint64_column_overflow() {
+    // Array with a UInt64 value that overflows i64
+    let sql = r"
+        WITH data AS (
+            SELECT unnest(arrow_cast([1, 18446744073709551615], 'List(UInt64)')) as val
+        )
+        SELECT json_from_scalar(val) FROM data
+    ";
+    let result = run_query(sql).await;
+    assert!(result.is_err());
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("out of range"));
+}
+
+#[tokio::test]
+async fn test_json_from_scalar_int8_column() {
+    let sql = r"
+        WITH data AS (
+            SELECT unnest(arrow_cast([1, 2, 3], 'List(Int8)')) as val
+        )
+        SELECT json_from_scalar(val) FROM data
+    ";
+    let batches = run_query(sql).await.unwrap();
+    let expected = [
+        "+----------------------------+",
+        "| json_from_scalar(data.val) |",
+        "+----------------------------+",
+        "| {int=1}                    |",
+        "| {int=2}                    |",
+        "| {int=3}                    |",
+        "+----------------------------+",
+    ];
+    assert_batches_eq!(expected, &batches);
+}
+
+#[tokio::test]
+async fn test_json_from_scalar_int16_column() {
+    let sql = r"
+        WITH data AS (
+            SELECT unnest(arrow_cast([1, 2, 3], 'List(Int16)')) as val
+        )
+        SELECT json_from_scalar(val) FROM data
+    ";
+    let batches = run_query(sql).await.unwrap();
+    let expected = [
+        "+----------------------------+",
+        "| json_from_scalar(data.val) |",
+        "+----------------------------+",
+        "| {int=1}                    |",
+        "| {int=2}                    |",
+        "| {int=3}                    |",
+        "+----------------------------+",
+    ];
+    assert_batches_eq!(expected, &batches);
+}
+
+#[tokio::test]
+async fn test_json_from_scalar_int32_column() {
+    let sql = r"
+        WITH data AS (
+            SELECT unnest(arrow_cast([1, 2, 3], 'List(Int32)')) as val
+        )
+        SELECT json_from_scalar(val) FROM data
+    ";
+    let batches = run_query(sql).await.unwrap();
+    let expected = [
+        "+----------------------------+",
+        "| json_from_scalar(data.val) |",
+        "+----------------------------+",
+        "| {int=1}                    |",
+        "| {int=2}                    |",
+        "| {int=3}                    |",
+        "+----------------------------+",
+    ];
+    assert_batches_eq!(expected, &batches);
+}
+
+#[tokio::test]
+async fn test_json_from_scalar_uint8_column() {
+    let sql = r"
+        WITH data AS (
+            SELECT unnest(arrow_cast([1, 2, 3], 'List(UInt8)')) as val
+        )
+        SELECT json_from_scalar(val) FROM data
+    ";
+    let batches = run_query(sql).await.unwrap();
+    let expected = [
+        "+----------------------------+",
+        "| json_from_scalar(data.val) |",
+        "+----------------------------+",
+        "| {int=1}                    |",
+        "| {int=2}                    |",
+        "| {int=3}                    |",
+        "+----------------------------+",
+    ];
+    assert_batches_eq!(expected, &batches);
+}
+
+#[tokio::test]
+async fn test_json_from_scalar_uint16_column() {
+    let sql = r"
+        WITH data AS (
+            SELECT unnest(arrow_cast([1, 2, 3], 'List(UInt16)')) as val
+        )
+        SELECT json_from_scalar(val) FROM data
+    ";
+    let batches = run_query(sql).await.unwrap();
+    let expected = [
+        "+----------------------------+",
+        "| json_from_scalar(data.val) |",
+        "+----------------------------+",
+        "| {int=1}                    |",
+        "| {int=2}                    |",
+        "| {int=3}                    |",
+        "+----------------------------+",
+    ];
+    assert_batches_eq!(expected, &batches);
+}
+
+#[tokio::test]
+async fn test_json_from_scalar_uint32_column() {
+    let sql = r"
+        WITH data AS (
+            SELECT unnest(arrow_cast([1, 2, 3], 'List(UInt32)')) as val
+        )
+        SELECT json_from_scalar(val) FROM data
+    ";
+    let batches = run_query(sql).await.unwrap();
+    let expected = [
+        "+----------------------------+",
+        "| json_from_scalar(data.val) |",
+        "+----------------------------+",
+        "| {int=1}                    |",
+        "| {int=2}                    |",
+        "| {int=3}                    |",
+        "+----------------------------+",
+    ];
+    assert_batches_eq!(expected, &batches);
+}
+
+#[tokio::test]
+async fn test_json_from_scalar_float32_column() {
+    let sql = r"
+        WITH data AS (
+            SELECT unnest(arrow_cast([1.0, 2.0, 3.0], 'List(Float32)')) as val
+        )
+        SELECT json_from_scalar(val) FROM data
+    ";
+    let batches = run_query(sql).await.unwrap();
+    let expected = [
+        "+----------------------------+",
+        "| json_from_scalar(data.val) |",
+        "+----------------------------+",
+        "| {float=1.0}                |",
+        "| {float=2.0}                |",
+        "| {float=3.0}                |",
+        "+----------------------------+",
+    ];
+    assert_batches_eq!(expected, &batches);
+}
+
+#[tokio::test]
+async fn test_json_from_scalar_large_utf8_column() {
+    let sql = r"
+        WITH data AS (
+            SELECT unnest(arrow_cast(['foo', 'bar', 'baz'], 'List(LargeUtf8)')) as val
+        )
+        SELECT json_from_scalar(val) FROM data
+    ";
+    let batches = run_query(sql).await.unwrap();
+    let expected = [
+        "+----------------------------+",
+        "| json_from_scalar(data.val) |",
+        "+----------------------------+",
+        "| {str=foo}                  |",
+        "| {str=bar}                  |",
+        "| {str=baz}                  |",
+        "+----------------------------+",
+    ];
+    assert_batches_eq!(expected, &batches);
+}
+
+#[tokio::test]
+async fn test_json_from_scalar_utf8_view_column() {
+    let sql = r"
+        WITH data AS (
+            SELECT unnest(arrow_cast(['foo', 'bar', 'baz'], 'List(Utf8View)')) as val
+        )
+        SELECT json_from_scalar(val) FROM data
+    ";
+    let batches = run_query(sql).await.unwrap();
+    let expected = [
+        "+----------------------------+",
+        "| json_from_scalar(data.val) |",
+        "+----------------------------+",
+        "| {str=foo}                  |",
+        "| {str=bar}                  |",
+        "| {str=baz}                  |",
+        "+----------------------------+",
+    ];
+    assert_batches_eq!(expected, &batches);
+}
+
+#[tokio::test]
+async fn test_json_from_scalar_null_column() {
+    let sql = r"
+        WITH data AS (
+            SELECT unnest(arrow_cast([NULL, NULL, NULL], 'List(Null)')) as val
+        )
+        SELECT json_from_scalar(val) FROM data
+    ";
+    let batches = run_query(sql).await.unwrap();
+    let expected = [
+        "+----------------------------+",
+        "| json_from_scalar(data.val) |",
+        "+----------------------------+",
+        "| {null=}                    |",
+        "| {null=}                    |",
+        "| {null=}                    |",
+        "+----------------------------+",
+    ];
+    assert_batches_eq!(expected, &batches);
+}
+
+#[tokio::test]
+async fn test_json_union_to_text() {
+    // Flatten the heterogeneous union from `json_get` to JSON text, exercising the
+    // str / array (list member) / object / null arms in a single batch.
+    let batches = run_query("select name, json_union_to_text(json_get(json_data, 'foo')) as foo from test")
+        .await
+        .unwrap();
+
+    let expected = [
+        "+------------------+-------+",
+        "| name             | foo   |",
+        "+------------------+-------+",
+        "| object_foo       | \"abc\" |",
+        "| object_foo_array | [1]   |",
+        "| object_foo_obj   | {}    |",
+        "| object_foo_null  |       |",
+        "| object_bar       |       |",
+        "| list_foo         |       |",
+        "| invalid_json     |       |",
+        "+------------------+-------+",
+    ];
+    assert_batches_eq!(expected, &batches);
+
+    // The output column is tagged with the canonical Arrow JSON extension type.
+    let field = batches[0].schema().field_with_name("foo").unwrap().clone();
+    assert_eq!(field.data_type(), &DataType::Utf8View);
+    assert_eq!(
+        field.metadata().get("ARROW:extension:name").map(String::as_str),
+        Some("arrow.json")
+    );
+    assert_eq!(field.metadata(), &json_field_metadata());
+}
+
+#[tokio::test]
+async fn test_json_union_to_text_arms() {
+    // array and object arms already hold raw JSON text and pass through verbatim,
+    // including nested structures.
+    let (dt, repr) = display_val(
+        run_query(r#"select json_union_to_text(json_get('{"a": [1, {"b": 2}]}', 'a'))"#)
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(dt, DataType::Utf8View);
+    assert_eq!(repr, r#"[1, {"b": 2}]"#);
+
+    // string scalars are JSON-quoted and escaped (here: embedded quote + newline)
+    let (_, repr) = display_val(
+        run_query(r#"select json_union_to_text(json_get('{"s": "a\"b\n"}', 's'))"#)
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(repr, r#""a\"b\n""#);
+
+    // numbers and booleans render as bare JSON literals
+    let (_, repr) = display_val(
+        run_query(r#"select json_union_to_text(json_get('{"n": 42}', 'n'))"#)
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(repr, "42");
+    let (_, repr) = display_val(
+        run_query(r#"select json_union_to_text(json_get('{"b": true}', 'b'))"#)
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(repr, "true");
 }

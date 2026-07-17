@@ -13,6 +13,7 @@ mod json_contains;
 mod json_extract;
 mod json_extract_scalar;
 mod json_format;
+mod json_from_scalar;
 mod json_get;
 mod json_get_array;
 mod json_get_bool;
@@ -23,9 +24,10 @@ mod json_get_str;
 mod json_length;
 mod json_object_keys;
 mod json_parse;
+mod json_union_to_text;
 mod rewrite;
 
-pub use common_union::{JsonUnionEncoder, JsonUnionValue, JSON_UNION_DATA_TYPE};
+pub use common_union::{json_field_metadata, JsonUnionEncoder, JsonUnionValue, JSON_UNION_DATA_TYPE};
 
 pub mod functions {
     pub use crate::json_as_text::json_as_text;
@@ -33,6 +35,7 @@ pub mod functions {
     pub use crate::json_extract::json_extract;
     pub use crate::json_extract_scalar::json_extract_scalar;
     pub use crate::json_format::json_format;
+    pub use crate::json_from_scalar::json_from_scalar;
     pub use crate::json_get::json_get;
     pub use crate::json_get_array::json_get_array;
     pub use crate::json_get_bool::json_get_bool;
@@ -43,11 +46,16 @@ pub mod functions {
     pub use crate::json_length::json_length;
     pub use crate::json_object_keys::json_object_keys;
     pub use crate::json_parse::json_parse;
+    pub use crate::json_union_to_text::json_union_to_text;
 }
 
 pub mod udfs {
     pub use crate::json_as_text::json_as_text_udf;
     pub use crate::json_contains::json_contains_udf;
+    pub use crate::json_extract::json_extract_udf;
+    pub use crate::json_extract_scalar::json_extract_scalar_udf;
+    pub use crate::json_format::json_format_udf;
+    pub use crate::json_from_scalar::json_from_scalar_udf;
     pub use crate::json_get::json_get_udf;
     pub use crate::json_get_array::json_get_array_udf;
     pub use crate::json_get_bool::json_get_bool_udf;
@@ -57,6 +65,8 @@ pub mod udfs {
     pub use crate::json_get_str::json_get_str_udf;
     pub use crate::json_length::json_length_udf;
     pub use crate::json_object_keys::json_object_keys_udf;
+    pub use crate::json_parse::json_parse_udf;
+    pub use crate::json_union_to_text::json_union_to_text_udf;
 }
 
 /// Register all JSON UDFs, and [`rewrite::JsonFunctionRewriter`] with the provided [`FunctionRegistry`].
@@ -85,6 +95,8 @@ pub fn register_all(registry: &mut dyn FunctionRegistry) -> Result<()> {
         json_contains::json_contains_udf(),
         json_length::json_length_udf(),
         json_object_keys::json_object_keys_udf(),
+        json_from_scalar::json_from_scalar_udf(),
+        json_union_to_text::json_union_to_text_udf(),
     ];
     functions.into_iter().try_for_each(|udf| {
         let existing_udf = registry.register_udf(udf)?;

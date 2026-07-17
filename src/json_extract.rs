@@ -1,11 +1,11 @@
+use datafusion::arrow::datatypes::{DataType, DataType::Utf8};
+use datafusion::common::{exec_err, Result as DataFusionResult, ScalarValue};
+use datafusion::logical_expr::{ColumnarValue, ScalarFunctionArgs, ScalarUDFImpl, Signature, Volatility};
+
 use crate::common::{invoke, parse_jsonpath, return_type_check};
 use crate::common_macros::make_udf_function;
 use crate::common_union::JsonUnion;
 use crate::json_get::jiter_json_get_union;
-use datafusion::arrow::datatypes::{DataType, DataType::Utf8};
-use datafusion::common::{exec_err, Result as DataFusionResult, ScalarValue};
-use datafusion::logical_expr::{ColumnarValue, ScalarFunctionArgs, ScalarUDFImpl, Signature, Volatility};
-use std::any::Any;
 
 make_udf_function!(
     JsonExtract,
@@ -23,20 +23,13 @@ pub(super) struct JsonExtract {
 impl Default for JsonExtract {
     fn default() -> Self {
         Self {
-            signature: Signature::exact(
-                vec![Utf8, Utf8], // JSON data and JSONPath as strings
-                Volatility::Immutable,
-            ),
+            signature: Signature::exact(vec![Utf8, Utf8], Volatility::Immutable),
             aliases: ["json_extract".to_string()],
         }
     }
 }
 
 impl ScalarUDFImpl for JsonExtract {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn name(&self) -> &str {
         self.aliases[0].as_str()
     }
@@ -62,7 +55,9 @@ impl ScalarUDFImpl for JsonExtract {
         let path_arg = &args.args[1];
 
         let path_str = match path_arg {
-            ColumnarValue::Scalar(ScalarValue::Utf8(Some(s))) => s,
+            ColumnarValue::Scalar(
+                ScalarValue::Utf8(Some(s)) | ScalarValue::Utf8View(Some(s)) | ScalarValue::LargeUtf8(Some(s)),
+            ) => s,
             _ => {
                 return exec_err!(
                     "'{}' expects a valid JSONPath string (e.g., '$.key[0]') as second argument",
