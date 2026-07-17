@@ -11,6 +11,8 @@ use datafusion::arrow::datatypes::{ArrowNativeType, DataType, Int64Type, UInt64T
 use datafusion::common::{exec_err, plan_err, Result as DataFusionResult, ScalarValue};
 use datafusion::logical_expr::ColumnarValue;
 use jiter::{Jiter, JiterError, Peek};
+use jsonpath_rust::parser::model::{Segment, Selector};
+use jsonpath_rust::parser::parse_json_path;
 
 use crate::common_union::{
     is_json_union, json_from_union_scalar, nested_json_array, nested_json_array_ref, TYPE_ID_NULL,
@@ -139,6 +141,23 @@ impl<'s> JsonPathArgs<'s> {
             .collect::<DataFusionResult<_>>()
             .map(JsonPathArgs::Scalars)
     }
+}
+
+
+pub(crate) fn parse_jsonpath(path: &str) -> Vec<JsonPath<'static>> {
+    let segments = parse_json_path(path).map(|it| it.segments).unwrap_or_default();
+
+    segments
+        .into_iter()
+        .map(|segment| match segment {
+            Segment::Selector(s) => match s {
+                Selector::Name(name) => JsonPath::Key(Box::leak(name.into_boxed_str())),
+                Selector::Index(idx) => JsonPath::Index(idx as usize),
+                _ => JsonPath::None,
+            },
+            _ => JsonPath::None,
+        })
+        .collect()
 }
 
 pub trait InvokeResult {
