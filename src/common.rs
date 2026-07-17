@@ -143,7 +143,6 @@ impl<'s> JsonPathArgs<'s> {
     }
 }
 
-
 pub(crate) fn parse_jsonpath(path: &str) -> Vec<JsonPath<'static>> {
     let segments = parse_json_path(path).map(|it| it.segments).unwrap_or_default();
 
